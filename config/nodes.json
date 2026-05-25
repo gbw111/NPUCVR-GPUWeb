@@ -47,8 +47,8 @@
         "order": 8
     },
     "Server10": {
-        "status": "maintenance",
-        "notice": "已返厂维修，主板损坏。（2025/12/30）",
+        "status": "available",
+        "notice": "",
         "order": 10
     },
     "Server11": {
@@ -90,5 +90,11 @@
         "status": "available",
         "notice": "",
         "order": 19
+    },
+    "Server20": {
+        "status": "available",
+        "notice": "",
+        "order": 20
     }
+
 }

@@ -10,6 +10,7 @@
         "NVIDIA GeForce RTX 3090": "RTX 3090 (24G)",
         "NVIDIA GeForce RTX 4090": "RTX 4090 (24G)",
         "NVIDIA L40": "L40 (48G)",
-        "NVIDIA RTX 5880 Ada Generation": "RTX 5880 Ada (48G)"
+        "NVIDIA RTX 5880 Ada Generation": "RTX 5880 Ada (48G)",
+	"NVIDIA RTX 6000D": "RTX Pro 6000D (84G)"
     }
 }
