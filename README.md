@@ -34,11 +34,12 @@
 ├── agent.py                   # GPU 信息采集脚本（Python版）
 ├── agent.sh                   # GPU 信息采集定时执行脚本（shell触发）
 |
-├── data/                      # 动态运行生成的 GPU 状态 JSON 数据
+├── data/                      # 动态运行生成的 GPU 实时状态 JSON 数据
     ├── Server1.json
     ├── Server2.json
     └── ...
 └── history/
+    ├── Server1_usage_state.json # 节点本地按天聚合的用量统计状态（固定窗口）
     └── daily/                 # 每日用户 GPU 用量归档
         ├── Server1_2026-05-27.json
         └── ...
@@ -84,6 +85,7 @@
     /home/user/NPUCVR-GPUWeb/agent.sh Server1 stuser 192.168.1.100 22
     # 如果没报错，且服务端的 data/ 目录下出现 Server1.json，
     # history/daily/ 目录下出现 Server1_YYYY-MM-DD.json，即成功。
+    # data/Server1.json 用于网页实时刷新；history/ 仅用于用户 GPU 用量统计。
 
     # 3. 添加 Crontab 定时任务 (每分钟采集一次)
     crontab -e
@@ -146,6 +148,8 @@
 - `min_user_gpus`：过滤过少的占用 GPU 数量，减少噪声。
 - `exclude_users`：不统计的用户列表。
 - `daily_archive`：是否生成每日用户 GPU 用量 JSON 归档。
+
+用量统计不会持续追加无限增长的文本日志。节点机会维护 `history/<NodeName>_usage_state.json`，按天聚合保存最近 `history_days` 天的数据；旧版本生成的 `history/<NodeName>_usage.jsonl` 只会在首次运行时用于迁移，不再继续写入。
 
 也可用环境变量覆盖：
 - `GPU_MONITOR_DISKS`（逗号分隔）

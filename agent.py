@@ -4,6 +4,7 @@ import sys
 import subprocess
 import os
 import psutil
+from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -246,17 +247,235 @@ def _load_history_lines(path, since_ts, metric=None):
         print(f"Warning: failed to read history {path}: {e}")
     return records
 
-def _write_history_lines(path, records):
-    try:
-        with open(path, "w") as f:
-            for rec in records:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"Warning: failed to write history {path}: {e}")
+def _day_text(ts):
+    return datetime.fromtimestamp(int(ts)).date().isoformat()
 
-def build_daily_usage_archive(node_name, records, cfg, total_gpus_latest, now_ts=None):
+def _timestamp_text(ts):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts)))
+
+def _cutoff_day_text(now_ts, history_days):
+    keep_days = max(int(history_days), 1)
+    cutoff_day = datetime.fromtimestamp(int(now_ts)).date() - timedelta(days=keep_days - 1)
+    return cutoff_day.isoformat()
+
+def _read_json_file(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: failed to read json {path}: {e}")
+        return None
+
+def _write_json_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+def _empty_usage_state(node_name):
+    return {
+        "version": 2,
+        "node": node_name,
+        "last_ts": 0,
+        "days": {}
+    }
+
+def _empty_usage_day(day_text, interval_sec):
+    return {
+        "date": day_text,
+        "sample_interval_sec": int(interval_sec),
+        "samples": 0,
+        "gpu_samples": 0,
+        "idle_samples": 0,
+        "active_gpus_sum": 0.0,
+        "total_gpus": 0,
+        "users": {}
+    }
+
+def _load_usage_state(path, node_name):
+    state = _read_json_file(path)
+    if not isinstance(state, dict):
+        return _empty_usage_state(node_name)
+
+    if not isinstance(state.get("days"), dict):
+        state["days"] = {}
+
+    try:
+        state["last_ts"] = int(state.get("last_ts", 0))
+    except Exception:
+        state["last_ts"] = 0
+
+    state["version"] = 2
+    state["node"] = node_name
+    return state
+
+def _prune_usage_state(state, now_ts, history_days):
+    cutoff = _cutoff_day_text(now_ts, history_days)
+    days = state.get("days", {})
+    state["days"] = {
+        day_text: day_data
+        for day_text, day_data in days.items()
+        if isinstance(day_data, dict) and day_text >= cutoff
+    }
+
+def _add_usage_sample(state, ts, users, active_gpus, total_gpus, interval_sec, min_user_gpus):
+    try:
+        ts = int(ts)
+        interval_sec = int(interval_sec)
+    except Exception:
+        return
+
+    if interval_sec <= 0:
+        return
+
+    try:
+        active_gpus = int(active_gpus)
+    except Exception:
+        active_gpus = 0
+
+    try:
+        total_gpus = int(total_gpus)
+    except Exception:
+        total_gpus = 0
+
+    day_text = _day_text(ts)
+    days = state.setdefault("days", {})
+    day = days.get(day_text)
+    if not isinstance(day, dict):
+        day = _empty_usage_day(day_text, interval_sec)
+        days[day_text] = day
+
+    day["sample_interval_sec"] = interval_sec
+    day["samples"] = int(day.get("samples", 0)) + 1
+    if total_gpus > 0:
+        day["gpu_samples"] = int(day.get("gpu_samples", 0)) + 1
+        day["active_gpus_sum"] = float(day.get("active_gpus_sum", 0.0)) + active_gpus
+        day["total_gpus"] = total_gpus
+        if active_gpus == 0:
+            day["idle_samples"] = int(day.get("idle_samples", 0)) + 1
+
+    if not isinstance(users, dict):
+        users = {}
+
+    day_users = day.setdefault("users", {})
+    for user, gpu_count in users.items():
+        try:
+            gpu_count = float(gpu_count)
+        except Exception:
+            continue
+        if gpu_count < min_user_gpus:
+            continue
+
+        entry = day_users.setdefault(user or "unknown", {
+            "samples": 0,
+            "gpu_seconds": 0.0,
+            "active_seconds": 0,
+            "max_gpus": 0.0,
+            "last_ts": 0
+        })
+        entry["samples"] = int(entry.get("samples", 0)) + 1
+        entry["gpu_seconds"] = float(entry.get("gpu_seconds", 0.0)) + gpu_count * interval_sec
+        entry["active_seconds"] = int(entry.get("active_seconds", 0)) + interval_sec
+        entry["max_gpus"] = max(float(entry.get("max_gpus", 0.0)), gpu_count)
+        entry["last_ts"] = max(int(entry.get("last_ts", 0)), ts)
+
+    state["last_ts"] = max(int(state.get("last_ts", 0)), ts)
+
+def _migrate_legacy_history(state, legacy_path, since_ts, interval_sec, min_user_gpus):
+    if state.get("last_ts", 0) > 0 or not os.path.exists(legacy_path):
+        return False
+
+    records = _load_history_lines(legacy_path, since_ts, metric="gpu_hours")
+    for rec in records:
+        _add_usage_sample(
+            state=state,
+            ts=rec.get("ts", 0),
+            users=rec.get("users", {}),
+            active_gpus=rec.get("active_gpus", 0),
+            total_gpus=rec.get("total_gpus", 0),
+            interval_sec=rec.get("interval_sec", interval_sec),
+            min_user_gpus=min_user_gpus
+        )
+    return bool(records)
+
+def _format_usage_users(user_stats, hour_digits):
+    users = []
+    if not isinstance(user_stats, dict):
+        return users
+
+    for user, entry in user_stats.items():
+        if not isinstance(entry, dict):
+            continue
+
+        samples = int(entry.get("samples", 0))
+        if samples == 0:
+            continue
+
+        last_ts = int(entry.get("last_ts", 0))
+        users.append({
+            "user": user,
+            "active_hours": round(float(entry.get("active_seconds", 0)) / 3600, hour_digits),
+            "gpu_hours": round(float(entry.get("gpu_seconds", 0.0)) / 3600, hour_digits),
+            "max_gpus": int(float(entry.get("max_gpus", 0))),
+            "samples": samples,
+            "last_seen": _timestamp_text(last_ts) if last_ts else None
+        })
+
+    users.sort(key=lambda x: (x["gpu_hours"], x["active_hours"]), reverse=True)
+    return users
+
+def _aggregate_user_stats(days):
+    stats = {}
+    for day in days:
+        for user, entry in (day.get("users") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            dst = stats.setdefault(user, {
+                "samples": 0,
+                "gpu_seconds": 0.0,
+                "active_seconds": 0,
+                "max_gpus": 0.0,
+                "last_ts": 0
+            })
+            dst["samples"] += int(entry.get("samples", 0))
+            dst["gpu_seconds"] += float(entry.get("gpu_seconds", 0.0))
+            dst["active_seconds"] += int(entry.get("active_seconds", 0))
+            dst["max_gpus"] = max(dst["max_gpus"], float(entry.get("max_gpus", 0.0)))
+            dst["last_ts"] = max(dst["last_ts"], int(entry.get("last_ts", 0)))
+    return stats
+
+def _build_daily_usage_data(node_name, day_text, day, interval_sec):
+    gpu_samples = int(day.get("gpu_samples", 0))
+    idle_samples = int(day.get("idle_samples", 0))
+    active_gpus_sum = float(day.get("active_gpus_sum", 0.0))
+    idle_rate = round((idle_samples / gpu_samples) * 100, 1) if gpu_samples else 0.0
+    avg_active_gpus = round(active_gpus_sum / gpu_samples, 1) if gpu_samples else 0.0
+
+    return {
+        "node": node_name,
+        "date": day_text,
+        "sample_interval_sec": int(day.get("sample_interval_sec", interval_sec)),
+        "total_samples": int(day.get("samples", 0)),
+        "total_gpus": int(day.get("total_gpus", 0)),
+        "idle_rate_percent": idle_rate,
+        "avg_active_gpus": avg_active_gpus,
+        "users": _format_usage_users(day.get("users", {}), 4)
+    }
+
+def _write_daily_usage_archive(node_name, day_text, day, cfg):
+    interval_sec = int(cfg.get("sample_interval_sec", 60))
+    daily_data = _build_daily_usage_data(node_name, day_text, day, interval_sec)
+    daily_dir = os.path.join(SCRIPT_DIR, "history", "daily")
+    daily_path = os.path.join(daily_dir, f"{node_name}_{day_text}.json")
+    _write_json_atomic(daily_path, daily_data)
+    return daily_path, daily_data
+
+def build_daily_usage_archive(node_name, state, cfg, now_ts=None):
     """
-    Generate per-day, per-user GPU usage archive for a single node.
+    Generate compact per-day, per-user GPU usage archive for a single node.
     Output:
         history/daily/{node_name}_YYYY-MM-DD.json
     Metric:
@@ -265,71 +484,29 @@ def build_daily_usage_archive(node_name, records, cfg, total_gpus_latest, now_ts
     if now_ts is None:
         now_ts = int(time.time())
 
-    day_text = time.strftime("%Y-%m-%d", time.localtime(now_ts))
-    day_start = int(time.mktime(time.strptime(day_text + " 00:00:00", "%Y-%m-%d %H:%M:%S")))
-    day_end = day_start + 24 * 3600
-    interval_sec = int(cfg.get("sample_interval_sec", 60))
-    min_user_gpus = int(cfg.get("min_user_gpus", 1))
+    today = datetime.fromtimestamp(int(now_ts)).date()
+    archive_days = [
+        (today - timedelta(days=1)).isoformat(),
+        today.isoformat()
+    ]
 
-    stats = {}
-    for rec in records:
-        ts = int(rec.get("ts", 0))
-        if ts < day_start or ts >= day_end:
+    current_path = None
+    current_data = None
+    for day_text in archive_days:
+        day = (state.get("days") or {}).get(day_text)
+        if not isinstance(day, dict):
             continue
+        daily_path, daily_data = _write_daily_usage_archive(node_name, day_text, day, cfg)
+        if day_text == today.isoformat():
+            current_path = daily_path
+            current_data = daily_data
 
-        rec_interval = int(rec.get("interval_sec", interval_sec))
-        for user, gpu_count in rec.get("users", {}).items():
-            try:
-                gpu_count = int(gpu_count)
-            except Exception:
-                continue
-            if gpu_count < min_user_gpus:
-                continue
+    if current_path is None:
+        day_text = today.isoformat()
+        day = _empty_usage_day(day_text, int(cfg.get("sample_interval_sec", 60)))
+        current_path, current_data = _write_daily_usage_archive(node_name, day_text, day, cfg)
 
-            entry = stats.setdefault(user, {
-                "samples": 0,
-                "gpu_seconds": 0.0,
-                "active_seconds": 0,
-                "max_gpus": 0,
-                "last_ts": 0
-            })
-            entry["samples"] += 1
-            entry["gpu_seconds"] += gpu_count * rec_interval
-            entry["active_seconds"] += rec_interval
-            entry["max_gpus"] = max(entry["max_gpus"], gpu_count)
-            entry["last_ts"] = max(entry["last_ts"], ts)
-
-    users = []
-    for user, entry in stats.items():
-        users.append({
-            "user": user,
-            "active_hours": round(entry["active_seconds"] / 3600, 4),
-            "gpu_hours": round(entry["gpu_seconds"] / 3600, 4),
-            "max_gpus": int(entry["max_gpus"]),
-            "samples": entry["samples"],
-            "last_seen": time.strftime(
-                "%Y-%m-%d %H:%M:%S",
-                time.localtime(entry["last_ts"])
-            ) if entry["last_ts"] else None
-        })
-
-    users.sort(key=lambda x: (x["gpu_hours"], x["active_hours"]), reverse=True)
-    daily_data = {
-        "node": node_name,
-        "date": day_text,
-        "sample_interval_sec": interval_sec,
-        "total_gpus": total_gpus_latest,
-        "users": users
-    }
-
-    daily_dir = os.path.join(SCRIPT_DIR, "history", "daily")
-    os.makedirs(daily_dir, exist_ok=True)
-    daily_path = os.path.join(daily_dir, f"{node_name}_{day_text}.json")
-    tmp_path = daily_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(daily_data, f, indent=4, ensure_ascii=False)
-    os.replace(tmp_path, daily_path)
-    return daily_path, daily_data
+    return current_path, current_data
 
 def build_usage_summary(node_name, gpus, cfg):
     history_days = int(cfg.get("history_days", 7))
@@ -338,7 +515,8 @@ def build_usage_summary(node_name, gpus, cfg):
 
     history_dir = os.path.join(SCRIPT_DIR, "history")
     os.makedirs(history_dir, exist_ok=True)
-    history_path = os.path.join(history_dir, f"{node_name}_usage.jsonl")
+    state_path = os.path.join(history_dir, f"{node_name}_usage_state.json")
+    legacy_history_path = os.path.join(history_dir, f"{node_name}_usage.jsonl")
 
     now_ts = int(time.time())
     window_sec = history_days * 24 * 3600
@@ -348,70 +526,48 @@ def build_usage_summary(node_name, gpus, cfg):
     exclude_users = set(cfg.get("exclude_users") or [])
     interval_sec = int(cfg.get("sample_interval_sec", 60))
 
-    records = _load_history_lines(history_path, since_ts, metric="gpu_hours")
+    state = _load_usage_state(state_path, node_name)
+    _migrate_legacy_history(
+        state=state,
+        legacy_path=legacy_history_path,
+        since_ts=since_ts,
+        interval_sec=interval_sec,
+        min_user_gpus=min_user_gpus
+    )
+    _prune_usage_state(state, now_ts, history_days)
 
+    # Keep real-time status in {node}.json; only the persisted usage history is compacted.
     snapshot_users, active_gpus, total_gpus = _collect_user_snapshot(gpus, exclude_users)
-    record = {
-        "ts": now_ts,
-        "metric": "gpu_hours",
-        "interval_sec": interval_sec,
-        "users": snapshot_users,
-        "active_gpus": active_gpus,
-        "total_gpus": total_gpus
-    }
-    records.append(record)
-    _write_history_lines(history_path, records)
+    _add_usage_sample(
+        state=state,
+        ts=now_ts,
+        users=snapshot_users,
+        active_gpus=active_gpus,
+        total_gpus=total_gpus,
+        interval_sec=interval_sec,
+        min_user_gpus=min_user_gpus
+    )
+    _prune_usage_state(state, now_ts, history_days)
+    _write_json_atomic(state_path, state)
 
-    stats = {}
-    total_samples = len(records)
-    idle_samples = 0
-    active_gpus_sum = 0
-    active_samples = 0
+    ordered_days = [
+        day
+        for _, day in sorted((state.get("days") or {}).items())
+        if isinstance(day, dict)
+    ]
+
+    total_samples = sum(int(day.get("samples", 0)) for day in ordered_days)
+    active_samples = sum(int(day.get("gpu_samples", 0)) for day in ordered_days)
+    idle_samples = sum(int(day.get("idle_samples", 0)) for day in ordered_days)
+    active_gpus_sum = sum(float(day.get("active_gpus_sum", 0.0)) for day in ordered_days)
+
     total_gpus_latest = total_gpus
-    for rec in records:
-        rec_users = rec.get("users", {})
-        rec_interval = int(rec.get("interval_sec", interval_sec))
-        ts = rec.get("ts", 0)
-        rec_active_gpus = int(rec.get("active_gpus", 0))
-        rec_total_gpus = int(rec.get("total_gpus", 0))
-        if rec_total_gpus > 0:
-            total_gpus_latest = rec_total_gpus
-            active_gpus_sum += rec_active_gpus
-            active_samples += 1
-            if rec_active_gpus == 0:
-                idle_samples += 1
+    for day in ordered_days:
+        day_total_gpus = int(day.get("total_gpus", 0))
+        if day_total_gpus > 0:
+            total_gpus_latest = day_total_gpus
 
-        for user, gpu_count in rec_users.items():
-            if gpu_count < min_user_gpus:
-                continue
-            entry = stats.setdefault(user, {
-                "samples": 0,
-                "gpu_seconds": 0.0,
-                "gpu_max": 0.0,
-                "active_seconds": 0,
-                "last_ts": 0
-            })
-            entry["samples"] += 1
-            entry["gpu_seconds"] += float(gpu_count) * rec_interval
-            entry["gpu_max"] = max(entry["gpu_max"], float(gpu_count))
-            entry["active_seconds"] += rec_interval
-            entry["last_ts"] = max(entry["last_ts"], int(ts))
-
-    users = []
-    for user, entry in stats.items():
-        if entry["samples"] == 0:
-            continue
-        users.append({
-            "user": user,
-            "active_hours": round(entry["active_seconds"] / 3600, 1),
-            "gpu_hours": round(entry["gpu_seconds"] / 3600, 1),
-            "max_gpus": int(entry["gpu_max"]),
-            "samples": entry["samples"],
-            "last_seen": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["last_ts"]))
-        })
-
-    users.sort(key=lambda x: (x["gpu_hours"], x["active_hours"]), reverse=True)
-
+    users = _format_usage_users(_aggregate_user_stats(ordered_days), 1)
     idle_rate = round((idle_samples / active_samples) * 100, 1) if active_samples else 0.0
     avg_active_gpus = round((active_gpus_sum / active_samples), 1) if active_samples else 0.0
 
@@ -427,9 +583,8 @@ def build_usage_summary(node_name, gpus, cfg):
     if cfg.get("daily_archive", True):
         daily_path, _ = build_daily_usage_archive(
             node_name=node_name,
-            records=records,
+            state=state,
             cfg=cfg,
-            total_gpus_latest=total_gpus_latest,
             now_ts=now_ts
         )
         usage["daily_archive"] = os.path.basename(daily_path)
