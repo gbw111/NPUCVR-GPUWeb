@@ -41,8 +41,9 @@
 └── history/
     ├── Server1_usage_state.json # 节点本地按天聚合的用量统计状态（固定窗口）
     └── daily/                 # 每日用户 GPU 用量归档
-        ├── Server1_2026-05-27.json
-        └── ...
+        └── Server1/
+            ├── Server1_2026-05-27.json
+            └── ...
 ```
 
 ## 🚀 部署指南
@@ -65,7 +66,7 @@
     ```python
     pip3 install psutil
     ```
-3. 配置上传路径 `agent.sh` 默认上传到服务端 `/var/www/html/gpu`，即状态 JSON 写入 `data/`，每日归档写入 `history/daily/`。如服务端路径不同，可通过环境变量覆盖。
+3. 配置上传路径 `agent.sh` 默认上传到服务端 `/var/www/html/gpu`，即状态 JSON 写入 `data/`，每日归档写入 `history/daily/<NodeName>/`。如服务端路径不同，可通过环境变量覆盖。
     ```python
     export GPU_MONITOR_REMOTE_ROOT=/var/www/html/gpu
     # 或分别覆盖:
@@ -84,7 +85,7 @@
     # 2. 手动测试运行 (参数：节点名 远程用户 远程IP SSH端口)
     /home/user/NPUCVR-GPUWeb/agent.sh Server1 stuser 192.168.1.100 22
     # 如果没报错，且服务端的 data/ 目录下出现 Server1.json，
-    # history/daily/ 目录下出现 Server1_YYYY-MM-DD.json，即成功。
+    # history/daily/Server1/ 目录下出现 Server1_YYYY-MM-DD.json，即成功。
     # data/Server1.json 用于网页实时刷新；history/ 仅用于用户 GPU 用量统计。
 
     # 3. 添加 Crontab 定时任务 (每分钟采集一次)

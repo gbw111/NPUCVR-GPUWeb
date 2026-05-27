@@ -18,6 +18,7 @@ cd $SCRIPT_DIR
 WEB_ROOT="${GPU_MONITOR_REMOTE_ROOT:-/var/www/html/gpu}"
 DATA_DIR="${GPU_MONITOR_REMOTE_DATA_DIR:-${WEB_ROOT}/data}"
 DAILY_DIR="${GPU_MONITOR_REMOTE_DAILY_DIR:-${WEB_ROOT}/history/daily}"
+REMOTE_NODE_DAILY_DIR="${DAILY_DIR}/${NODE_NAME}"
 LOCAL_DAILY_DIR="${SCRIPT_DIR}/history/daily"
 
 SCP_OPTS=(-P "$REMOTE_PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=5)
@@ -37,7 +38,7 @@ JSON_FILE="${NODE_NAME}.json"
 # 2. 上传至汇总服务器
 # 当前状态: /var/www/html/gpu/data/
 # 每日归档: /var/www/html/gpu/history/daily/
-mkdir_cmd=$(printf "mkdir -p %q %q" "$DATA_DIR" "$DAILY_DIR")
+mkdir_cmd=$(printf "mkdir -p %q %q" "$DATA_DIR" "$REMOTE_NODE_DAILY_DIR")
 ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_SERVER}" "$mkdir_cmd"
 
 if [ $? -ne 0 ]; then
@@ -68,7 +69,7 @@ for DAY in "$YESTERDAY" "$TODAY"; do
     fi
 
     echo "Uploading daily archive $(basename "$DAILY_FILE") to $REMOTE_SERVER..."
-    scp "${SCP_OPTS[@]}" "$DAILY_FILE" "${REMOTE_USER}@${REMOTE_SERVER}:${DAILY_DIR}/"
+    scp "${SCP_OPTS[@]}" "$DAILY_FILE" "${REMOTE_USER}@${REMOTE_SERVER}:${REMOTE_NODE_DAILY_DIR}/"
     if [ $? -ne 0 ]; then
         echo "Error: Daily archive upload failed: $DAILY_FILE"
         DAILY_UPLOAD_FAILED=1
