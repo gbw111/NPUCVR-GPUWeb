@@ -34,10 +34,14 @@
 ├── agent.py                   # GPU 信息采集脚本（Python版）
 ├── agent.sh                   # GPU 信息采集定时执行脚本（shell触发）
 |
-└── data/                      # 动态运行生成的 GPU 状态 JSON 数据
+├── data/                      # 动态运行生成的 GPU 状态 JSON 数据
     ├── Server1.json
     ├── Server2.json
     └── ...
+└── history/
+    └── daily/                 # 每日用户 GPU 用量归档
+        ├── Server1_2026-05-27.json
+        └── ...
 ```
 
 ## 🚀 部署指南
@@ -47,7 +51,7 @@
 适用于：汇总展示数据的机器 (需要安装 Nginx/Apache 或使用 Python HTTP)
 
 1. 上传代码 将 NPUCVR-GPUWeb 文件夹完整放置在 Web 服务器目录下（例如 /var/www/html/gpu）。
-2. 设置权限 (关键步骤) 必须赋予 data 目录写入权限，否则节点无法上传数据。
+2. 设置权限 (关键步骤) 必须赋予 data 和 history/daily 目录写入权限，否则节点无法上传数据。
 3. 配置节点 编辑 config/nodes.json，注册所有需要监控的节点名称（未注册的节点上传数据也不会显示）。
 4. 访问 打开浏览器访问：http://gpu.npu-cvr.cn/
 
@@ -60,9 +64,12 @@
     ```python
     pip3 install psutil
     ```
-3. 配置上传路径 编辑 agent.sh，修改 TARGET_DIR 变量，使其指向服务端的实际绝对路径。
+3. 配置上传路径 `agent.sh` 默认上传到服务端 `/var/www/html/gpu`，即状态 JSON 写入 `data/`，每日归档写入 `history/daily/`。如服务端路径不同，可通过环境变量覆盖。
     ```python
-    vim agent.sh
+    export GPU_MONITOR_REMOTE_ROOT=/var/www/html/gpu
+    # 或分别覆盖:
+    # export GPU_MONITOR_REMOTE_DATA_DIR=/var/www/html/gpu/data
+    # export GPU_MONITOR_REMOTE_DAILY_DIR=/var/www/html/gpu/history/daily
     ```
 4. 配置免密 SSH 确保节点机可以免密传输文件到服务端。
     ```bash
@@ -75,7 +82,8 @@
 
     # 2. 手动测试运行 (参数：节点名 远程用户 远程IP SSH端口)
     /home/user/NPUCVR-GPUWeb/agent.sh Server1 stuser 192.168.1.100 22
-    # 如果没报错，且服务端的 data/ 目录下出现了 Server1.json，即成功。
+    # 如果没报错，且服务端的 data/ 目录下出现 Server1.json，
+    # history/daily/ 目录下出现 Server1_YYYY-MM-DD.json，即成功。
 
     # 3. 添加 Crontab 定时任务 (每分钟采集一次)
     crontab -e
@@ -127,7 +135,8 @@
     "history_days": 7,
     "sample_interval_sec": 60,
     "min_user_gpus": 1,
-    "exclude_users": ["root"]
+    "exclude_users": ["root"],
+    "daily_archive": true
 }
 ```
 字段说明：
@@ -136,6 +145,7 @@
 - `sample_interval_sec`：采样间隔（建议与 crontab 频率一致）。
 - `min_user_gpus`：过滤过少的占用 GPU 数量，减少噪声。
 - `exclude_users`：不统计的用户列表。
+- `daily_archive`：是否生成每日用户 GPU 用量 JSON 归档。
 
 也可用环境变量覆盖：
 - `GPU_MONITOR_DISKS`（逗号分隔）
@@ -143,3 +153,4 @@
 - `GPU_MONITOR_SAMPLE_INTERVAL_SEC`
 - `GPU_MONITOR_MIN_USER_GPUS`
 - `GPU_MONITOR_EXCLUDE_USERS`（逗号分隔）
+- `GPU_MONITOR_DAILY_ARCHIVE`（`0/false/no/off` 表示关闭）
